@@ -26,11 +26,11 @@ class NNTP(asyncnntp.NNTP):
             self.logger.info("Reconnecting...")
             self.reconnect()
 
-        def on_ready(self, request):
-            """
-            Once this is called we are fully connected and authenticated.
-            """
-            self.logger.info("Connected!")
+    def on_ready(self, request):
+        """
+        Once this is called we are fully connected and authenticated.
+        """
+        self.logger.info("Connected!")
 
 if __name__ == "__main__":
     # Enable logging
