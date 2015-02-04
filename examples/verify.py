@@ -5,7 +5,6 @@ import sys
 sys.path.append("../")
 
 import asyncnntp
-import asyncore
 import os
 import time
 import logging

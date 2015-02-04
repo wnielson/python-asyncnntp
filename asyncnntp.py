@@ -5,11 +5,7 @@ import asyncore
 import asynchat
 import logging
 import nntplib
-import os
-import re
-import select
 import socket
-import sys
 import thread
 import time
 
