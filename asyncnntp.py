@@ -427,6 +427,9 @@ class NNTP(asynchat.async_chat):
             self.logger.debug("sending command: %s" % line.strip())
             self.push(line)
 
+    def ready(self):
+        return self._connected
+
     ############################################################################
     # Client functions
     ############################################################################
