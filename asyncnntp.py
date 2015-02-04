@@ -247,7 +247,7 @@ class NNTP(asynchat.async_chat):
             return asynchat.async_chat.recv(self, buffer_size)
         except Exception as e:
             if _have_ssl:
-                if isinstance(e, ssl.SSLWantReadError):
+                if isinstance(e, ssl.SSLError) and e.args[0] == ssl.SSL_ERROR_WANT_READ:
                     return ''
             raise e
 
