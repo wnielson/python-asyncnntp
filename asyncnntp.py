@@ -11,8 +11,6 @@ import sys
 import thread
 import time
 
-import pdb
-
 try:
     import ssl
 except ImportError:
