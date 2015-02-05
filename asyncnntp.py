@@ -3,11 +3,15 @@ asyncnntp.py - An asynchronous NNTP client.
 """
 import asyncore
 import asynchat
+import collections
 import logging
 import nntplib
 import socket
+import sys
 import thread
 import time
+
+import pdb
 
 try:
     import ssl
@@ -72,7 +76,7 @@ class Request:
     """
     
     """
-    def __init__(self, command, *args, **kwargs):
+    def __init__(self, nntp, command, *args, **kwargs):
         self.command          = command.upper()
         self.args             = args
         self.response_code    = None
@@ -81,7 +85,8 @@ class Request:
         self.multiline        = self.command in LONG_RESP_COMMANDS
         self.lines            = None
         self.logger           = logging.getLogger("NNTP::Request")
-        self.callback         = kwargs.get("callback", None)
+        self.callbacks        = kwargs.get("callbacks", None)
+        self.nntp             = nntp
 
     def __repr__(self):
         return "<%s>" % str(self)
@@ -108,8 +113,8 @@ class Request:
             return "%s.%s" % (CRLF,CRLF)
         return CRLF
 
-    def get_callback(self):
-        return self.callback or "on_%s" % self.command.lower()
+    def get_callbacks(self):
+        return self.callbacks or ("on_%s" % "_".join(self.command.lower().split()),)
 
     def handle_data(self, data):
         """
@@ -139,13 +144,15 @@ class NNTP(asynchat.async_chat):
     
     """
     def __init__(self, host, port=119, user=None, password=None,
-                 readermode=None, usenetrc=True, use_ssl=None):
+                 readermode=None, usenetrc=True, use_ssl=None,
+                 interactive=False):
 
-        self.host       = host
-        self.port       = port
-        self.__username = user
-        self.__password = password
-        self.logger     = logging.getLogger('NNTP')
+        self.host        = host
+        self.port        = port
+        self.__username  = user
+        self.__password  = password
+        self.logger      = logging.getLogger('NNTP')
+        self.interactive = interactive
 
         self.use_ssl = use_ssl
         if self.use_ssl is None:
@@ -193,17 +200,32 @@ class NNTP(asynchat.async_chat):
             self.want_read = self.want_write = True
             self.established = True
 
-    def _do_callback(self, name, *args, **kwargs):
-        # Try internal callback first
-        _name = "_%s" % name
-        if hasattr(self, _name):
-            self.logger.debug("Calling %s()" % _name)
-            getattr(self, _name)(*args, **kwargs)
+    def _do_callback(self, callbacks, *args, **kwargs):
+        if isinstance(callbacks, basestring):
+            callbacks = (callbacks,)
 
-        # Then try user-defined callback
-        if hasattr(self, name):
-            self.logger.debug("Calling %s()" % name)
-            getattr(self, name)(*args, **kwargs)
+        if not isinstance(callbacks, collections.Iterable):
+            self.logger.error("Callbacks is not an iterable")
+            return
+
+        for callback in callbacks:
+            if not callback:
+                continue
+
+            if isinstance(callback, basestring):
+                # Try internal callback first
+                _name = "_%s" % callback
+                if hasattr(self, _name):
+                    self.logger.debug("Calling %s()" % _name)
+                    getattr(self, _name)(*args, **kwargs)
+
+                # Then try user-defined callback
+                if hasattr(self, callback):
+                    self.logger.debug("Calling %s()" % callback)
+                    getattr(self, callback)(*args, **kwargs)
+            
+            elif callable(callback):
+                callback(*args, **kwargs)
 
     def handle_connect(self):
         """
@@ -356,11 +378,14 @@ class NNTP(asynchat.async_chat):
 
         if self._request is None:
             # If we still don't have a request, then we need to construct one
-            self._request = Request("UNKNOWN")
+            self._request = Request(self, "UNKNOWN")
 
         self._request.handle_data(data)
 
     def found_terminator(self):
+        #if self.interactive:
+        #    time.sleep(0.3)
+
         self.logger.debug('found_terminator()')
 
         # This should never happen
@@ -393,8 +418,8 @@ class NNTP(asynchat.async_chat):
                 self.logger.warn("UNKNOWN Request; code %s" % request.response_code)
 
         # Get the name of the callback and try to call it
-        callback = request.get_callback()
-        self._do_callback(callback, request)
+        callbacks = request.get_callbacks()
+        self._do_callback(callbacks, request)
 
         # Send the next request in the FIFO
         self.sendrequest()
@@ -413,6 +438,10 @@ class NNTP(asynchat.async_chat):
         Gets the next :class:`Request` from the request FIFO and sends the
         command to the server.
         """
+        #if not self._connected:
+        #    # We're not ready yet
+        #    return
+
         _, request = self._fifo.pop()
 
         if request:
@@ -430,10 +459,14 @@ class NNTP(asynchat.async_chat):
     def ready(self):
         return self._connected
 
+    def verbose(self, stream=sys.stdout, level=logging.DEBUG,
+                format="[%(levelname)-8s] %(message)s"):
+        logging.basicConfig(stream=stream, level=level, format=format)
+
     ############################################################################
     # Client functions
     ############################################################################
-    def username(self, username):
+    def username(self, username, callback=None):
         """
         Send an
         `AUTHINFO USER <https://tools.ietf.org/html/rfc2980#section-3.1.1>`_
@@ -441,10 +474,10 @@ class NNTP(asynchat.async_chat):
 
         :callback: ``on_username``
         """
-        self.addrequest(Request("AUTHINFO", "USER", username,
-                                callback="on_username"))
+        self.addrequest(Request(self, "AUTHINFO", "USER", username,
+                                callbacks=(callback, "on_username")))
 
-    def password(self, password):
+    def password(self, password, callback=None):
         """
         Send an
         `AUTHINFO PASS <https://tools.ietf.org/html/rfc2980#section-3.1.1>`_
@@ -452,34 +485,50 @@ class NNTP(asynchat.async_chat):
 
         :callback: ``on_username``.
         """
-        self.addrequest(Request("AUTHINFO", "PASS", password,
-                                callback="on_username"))
+        self.addrequest(Request(self, "AUTHINFO", "PASS", password,
+                                callbacks=(callback, "on_password")))
 
-    def mode_reader(self):
+    def capabilities(self, callback=None):
         """
+        Send a `CAPABILITIES <https://tools.ietf.org/html/rfc3977#section-5.2>`_
+        command.
+
+        :callback: `on_capabilities`
+        """
+        self.addrequest(Request(self, "CAPABILITIES",
+                                callbacks=(callback, "on_capabilities")))
+
+    def mode_reader(self, callback=None):
+        """
+        Send a `MODE READER <https://tools.ietf.org/html/rfc3977#section-5.3>`_
+        command.
+
         :callback: ``on_mode_reader``
         """
-        self.addrequest(Request("MODE READER", callback="on_mode_reader"))
+        self.addrequest(Request(self, "MODE READER",
+                                callbacks=(callback, "on_mode_reader")))
 
-    def quit(self):
+    def quit(self, callback=None):
         """
         Send a `QUIT <https://tools.ietf.org/html/rfc3977#section-5.4>`_
         command.
 
         :callback: ``on_quit``
         """
-        self.addrequest(Request("QUIT", callback="on_quit"))
+        self.addrequest(Request(self, "QUIT",
+                                callbacks=(callback, "on_quit")))
 
-    def group(self, name):
+    def group(self, name, callback=None):
         """
         Send a `GROUP <https://tools.ietf.org/html/rfc3977#section-6.1.1>`_
         command, where ``name`` is a `string` of the desired group.
 
         :callback: ``do_group``
         """
-        self.addrequest(Request("GROUP", name, callback="on_group"))
+        self.addrequest(Request(self, "GROUP", name,
+                                callbacks=(callback, "on_group")))
 
-    def listgroup(self, group=None, range=None):
+    def listgroup(self, group=None, range=None, callback=None):
         """
         Send a `LISTGROUP <https://tools.ietf.org/html/rfc3977#section-6.1.2>`_
         command.  If ``group`` is provided, then that group will be selected,
@@ -488,28 +537,30 @@ class NNTP(asynchat.async_chat):
 
         :callback: ``on_listgroup``
         """
-        self.addrequest(Request("LISTGROUP", group, range,
-                                callback="on_listgroup"))
+        self.addrequest(Request(self, "LISTGROUP", group, range,
+                                callbacks=(callback, "on_listgroup")))
 
-    def last(self):
+    def last(self, callback=None):
         """
         Send a `LAST <https://tools.ietf.org/html/rfc3977#section-6.1.3>`_
         command.
 
         :callback: ``on_last``
         """
-        self.addrequest(Request("LAST", callback="on_last"))
+        self.addrequest(Request(self, "LAST",
+                                callbacks=(callback, "on_last")))
 
-    def next(self):
+    def next(self, callback=None):
         """
         Send a `NEXT <https://tools.ietf.org/html/rfc3977#section-6.1.4>`_
         command.
 
         :callback: ``on_next``
         """
-        self.addrequest(Request("NEXT", callback="on_next"))
+        self.addrequest(Request(self, "NEXT",
+                                callbacks=(callback, "on_next")))
 
-    def article(self, article):
+    def article(self, article, callback=None):
         """
         Send a `ARTICLE <https://tools.ietf.org/html/rfc3977#section-6.2.1>`_
         command.  If a group has been selected (via a prior call to
@@ -519,9 +570,10 @@ class NNTP(asynchat.async_chat):
 
         :callback: ``on_article``
         """
-        self.addrequest(Request("ARTICLE", article, callback="on_article"))
+        self.addrequest(Request(self, "ARTICLE", article,
+                                callbacks=(callback, "on_article")))
 
-    def head(self, article):
+    def head(self, article, callback=None):
         """
         Send a `HEAD <https://tools.ietf.org/html/rfc3977#section-6.2.2>`_
         command.  See :func:`article` for a description of allowable forms for
@@ -529,9 +581,10 @@ class NNTP(asynchat.async_chat):
 
         :callback: ``on_head``
         """
-        self.addrequest(Request("HEAD", article, callback="on_head"))
+        self.addrequest(Request(self, "HEAD", article,
+                                callbacks=(callback, "on_head")))
 
-    def body(self, article):
+    def body(self, article, callback=None):
         """
         Send a `BODY <https://tools.ietf.org/html/rfc3977#section-6.2.3>`_
         command.  See :func:`article` for a description of allowable forms for
@@ -539,9 +592,10 @@ class NNTP(asynchat.async_chat):
 
         :callback: ``on_body``
         """
-        self.addrequest(Request("BODY", article, callback="on_body"))
+        self.addrequest(Request(self, "BODY", article,
+                                callbacks=(callback, "on_body")))
 
-    def stat(self, article):
+    def stat(self, article, callback=None):
         """
         Send a `STAT <https://tools.ietf.org/html/rfc3977#section-6.2.4>`_
         command.  See :func:`article` for a description of allowable forms for
@@ -549,25 +603,28 @@ class NNTP(asynchat.async_chat):
 
         :callback: ``on_stat``
         """
-        self.addrequest(Request("STAT", article, callback="on_stat"))
+        self.addrequest(Request(self, "STAT", article,
+                                callbacks=(callback, "on_stat")))
 
-    def date(self):
+    def date(self, callback=None):
         """
         Send a `DATE <https://tools.ietf.org/html/rfc3977#section-7.1>`_
         command.
 
         :callback: ``on_date``
         """
-        self.addrequest(Request("DATE", callback="on_date"))
+        self.addrequest(Request(self, "DATE",
+                                callbacks=(callback, "on_date")))
 
-    def list(self):
+    def list(self, callback=None):
         """
         Send a `LIST <https://tools.ietf.org/html/rfc3977#section-7.6.1>`_
         command.
 
         :callback: ``on_list``
         """
-        self.addrequest(Request("LIST", callback="on_list"))
+        self.addrequest(Request(self, "LIST",
+                                callbacks=(callback, "on_list")))
 
     ############################################################################
     # Internal callback functions
